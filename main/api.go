@@ -20,14 +20,13 @@ func main() {
 
 	createTable()
 	e := echo.New()
-
 	e.POST("/login", login)
-	e.POST("/signUp", signUp)
+	e.POST("/sign-up", signUp)
 	e.GET("/profile", profile)
-
 	e.Logger.Fatal(e.Start(":1323"))
 }
 
+// db
 func initDB() {
 	var err error
 	if db, err = sql.Open("mysql", "root@tcp(127.0.0.1:3306)/apiWithJwtToken"); err != nil {
@@ -66,6 +65,8 @@ CREATE TABLE IF  NOT EXISTS tokens(
 		return
 	}
 }
+
+// route
 func signUp(c echo.Context) error {
 	type User struct {
 		NAME     string `json:"username"`
@@ -125,6 +126,93 @@ func login(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]string{"token": token})
 
 }
+func profile2(c echo.Context) error {
+	// Extract token from the Authorization header
+	tokenString := c.Request().Header.Get("Authorization")
+	if tokenString == "" {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"message": "token is missing"})
+	}
+
+	// Remove "Bearer " prefix if present
+	if len(tokenString) > 7 && tokenString[:7] == "Bearer " {
+		tokenString = tokenString[7:]
+	}
+
+	// Parse and validate the token
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Ensure that the token's signing method is HMAC
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return secretKey, nil
+	})
+
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"message": "invalid token"})
+	}
+
+	// Extract claims
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok || !token.Valid {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"message": "invalid token"})
+	}
+
+	// Get user ID from claims
+	userID, ok := claims["user_id"].(float64) // Claims are returned as float64
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"message": "user ID not found in token"})
+	}
+
+	// Query user information from the database
+	var username, email string
+	err = db.QueryRow("SELECT username, email FROM users WHERE id = ?", int(userID)).Scan(&username, &email)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"message": "error retrieving user information"})
+	}
+
+	// Return the user profile information
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"username": username,
+		"email":    email,
+	})
+}
+func profile(c echo.Context) error {
+	// Extract token from the Authorization header
+	tokenString := c.Request().Header.Get("Authorization")
+	if tokenString == "" {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"message": "token is missing"})
+	}
+
+	// Remove "Bearer " prefix if present
+	if len(tokenString) > 7 && tokenString[:7] == "Bearer " {
+		tokenString = tokenString[7:]
+	}
+
+	// Query to find user ID associated with the token
+	var userID int
+	err := db.QueryRow("SELECT userId FROM tokens WHERE TOKEN = ?", tokenString).Scan(&userID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return c.JSON(http.StatusUnauthorized, map[string]string{"message": "invalid or expired token"})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"message": "error querying token"})
+	}
+
+	// Query to fetch user information from the database
+	var username, email string
+	err = db.QueryRow("SELECT username, email FROM users WHERE id = ?", userID).Scan(&username, &email)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"message": "error retrieving user information"})
+	}
+
+	// Return user profile information
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"username": username,
+		"email":    email,
+	})
+}
+
+// utils
 func generateToken(id int) (string, error) {
 
 	claims := jwt.MapClaims{
@@ -140,66 +228,4 @@ func generateToken(id int) (string, error) {
 	}
 
 	return signedKey, nil
-}
-func profile(c echo.Context) error {
-	tokenString := c.Request().Header.Get("Authorization")
-	if tokenString == "" {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"message": "token is missing"})
-	}
-	tokenString = tokenString[len("Bearer "):]
-
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-
-			return nil, fmt.Errorf("unexpected signing method %v", token.Header["alg"])
-		}
-		return []byte("your_secret_key"), nil
-	})
-	if err != nil || !token.Valid {
-
-		return c.JSON(http.StatusUnauthorized, map[string]string{"message": "invalid token"})
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return c.JSON(http.StatusUnauthorized, map[string]string{
-			"message": "Invalid token claims",
-		})
-	}
-	userID := claims["user_id"].(string)
-
-	var dbUserID string
-	query := "SELECT userId FROM tokens WHERE tokens = ?"
-	err = db.QueryRow(query, tokenString).Scan(&dbUserID)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return c.JSON(http.StatusUnauthorized, map[string]string{
-				"message": "Token not found",
-			})
-		}
-		return err
-	}
-	if dbUserID != userID {
-		return c.JSON(http.StatusUnauthorized, map[string]string{
-			"message": "Token does not match",
-		})
-	}
-	type User struct {
-		ID    int
-		Email string
-		Name  string
-	}
-	var user User
-	query = "SELECT id, email, name FROM users WHERE id = ?"
-	err = db.QueryRow(query, userID).Scan(&user.ID, &user.Email, &user.Name)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return c.JSON(http.StatusNotFound, map[string]string{
-				"message": "User not found",
-			})
-		}
-		return err
-	}
-
-	return c.JSON(http.StatusOK, user)
 }
